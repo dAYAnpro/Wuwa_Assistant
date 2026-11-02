@@ -1,0 +1,12 @@
+(
+echo build/
+echo dist/
+echo __pycache__/
+echo *.pyc
+echo .venv/
+echo *.spec
+echo raw_scans/
+echo *.png
+echo *.jpg
+echo echoes.json
+) > .gitignore
