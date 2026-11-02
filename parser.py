@@ -75,7 +75,6 @@ NAME_TO_SONATA = {
     "Crownless": "Havoc (Sun-sinking Eclipse)",
     "Dreamless": "Havoc (Sun-sinking Eclipse)",
     "Jué": "Spectro (Celestial Light)",
-    "Inferno": "Fusion (Molten Rift)",
     
     # 3-Costs & 1-Costs common keywords
     "Soulfrayer": "Electro (Void Thunder)",
@@ -124,14 +123,12 @@ def parse_stat_line(label: str, value_str: str):
     value_clean = value_str.replace(' ', '').replace(',', '.')
     is_percent = '%' in value_clean
 
-    # Safely extract float without throwing ValueError on OCR noise
     val_match = re.search(r'(\d+(?:\.\d+)?)', value_clean)
     try:
         val_num = float(val_match.group(1)) if val_match else 0.0
     except (ValueError, TypeError):
         val_num = 0.0
 
-    # Differentiate flat vs percentage for ATK, HP, DEF
     n_clean = re.sub(r'[^a-zA-Z]', '', clean).upper()
     if n_clean in ["ATK", "HP", "DEF"]:
         stat_name = f"{n_clean}%" if is_percent else f"Flat {n_clean}"
@@ -160,21 +157,13 @@ def parse_stat_line(label: str, value_str: str):
 
 class EchoParser:
     def __init__(self):
-        # High-Performance RapidOCR Configuration:
-        # 1. use_angle_cls=False: Wuthering Waves UI is always horizontal.
-        # 2. rec_batch_num=16: Batches bounding boxes into parallel tensor operations across CPU cores.
         self.ocr = RapidOCR(
             Global={"use_angle_cls": False},
             Rec={"rec_batch_num": 16}
         )
 
     def detect_sonata_color(self, icon_crop):
-        """
-        Identify Sonata element family using color hue clustering.
-        Enhanced thresholds:
-        - Filters out low saturation dark background (s > 90, v > 70)
-        - Uses strict hue ranges to avoid dark-slate slate/blue menu bleeding into Glacio.
-        """
+        """Identify Sonata element family using color hue clustering."""
         if icon_crop is None or icon_crop.size == 0:
             return "Unknown"
         hsv = cv2.cvtColor(icon_crop, cv2.COLOR_BGR2HSV)
@@ -183,20 +172,12 @@ class EchoParser:
         # Stricter mask: higher saturation & brightness to isolate the glowing icon
         mask = (s > 90) & (v > 70)
         if np.sum(mask) < 15:
-            # Fallback to moderate mask if icon was faint
             mask = (s > 70) & (v > 50)
             if np.sum(mask) < 10:
                 return "Unknown"
 
         mean_hue = np.median(h[mask])
         
-        # Color ranges in OpenCV HSV (H: 0-180, S: 0-255, V: 0-255):
-        # Havoc: Purple/Magenta (~135-165)
-        # Electro: Violet/Purple-Blue (~115-135)
-        # Glacio: Cyan/Ice-Blue (~88-112)
-        # Aero: Bright Mint/Green (~35-85)
-        # Spectro: Warm Gold/Yellow (~20-35)
-        # Fusion: Red/Orange-Red (< 12 or >= 165)
         if 138 <= mean_hue <= 165:
             return "Havoc (Sun-sinking Eclipse / Midnight Veil)"
         elif 115 < mean_hue < 138:
@@ -214,7 +195,6 @@ class EchoParser:
 
     def infer_sonata_from_name_or_stats(self, name: str, main_stats: list) -> str:
         """Fallback to resolve Sonata set when image color check is uncertain or ambiguous."""
-        # 1. Direct elemental damage main stat (3-Cost Echoes)
         for m in main_stats:
             stat_name = m.get("stat", "")
             if "Electro DMG" in stat_name:
@@ -230,7 +210,6 @@ class EchoParser:
             elif "Glacio DMG" in stat_name:
                 return "Glacio (Freezing Frost)"
 
-        # 2. Known monster name lookup
         for key, sonata in NAME_TO_SONATA.items():
             if key.lower() in name.lower():
                 return sonata
@@ -238,19 +217,13 @@ class EchoParser:
         return "Unknown"
 
     def parse_panel(self, panel_img):
-        """
-        Fast Single-Pass OCR & Stat Matcher.
-        Cuts runtime by ~60% compared to multiple crop passes.
-        """
         h, w, _ = panel_img.shape
 
-        # Crop the active Echo card area (y: 7% to 78%, skipping currency header & upgrade button)
         y_start = int(h * 0.07)
         y_end = int(h * 0.78)
         card = panel_img[y_start:y_end, :]
         ch, cw, _ = card.shape
 
-        # Single-pass OCR
         ocr_res, _ = self.ocr(card)
         if not ocr_res:
             return None
@@ -266,15 +239,12 @@ class EchoParser:
             "total_cv": 0.0
         }
 
-        # Dynamic pixel thresholds scaling with screen resolution
         max_line_gap = max(20, int(h * 0.045))
         max_match_dy = max(22, int(h * 0.048))
 
-        # Collect text boxes
         items = []
         for box, text, score in ocr_res:
             t = text.strip()
-            # Stop if reached Echo Skill section
             if "Echo Skill" in t or "Fcho Skill" in t or ("Skill" in t and "Resonance" not in t):
                 break
             ys = [p[1] for p in box]
@@ -292,27 +262,21 @@ class EchoParser:
 
         items.sort(key=lambda it: it["cy"])
 
-        # Split items into Header (top 35% of card) and Stats (below 35%)
         header_cutoff_y = ch * 0.35
         header_items = [it for it in items if it["cy"] < header_cutoff_y]
         stats_items = [it for it in items if it["cy"] >= header_cutoff_y]
 
-        # 1. Parse Header items: Name, Level, Sonata, Cost
         detected_sonata_color = "Unknown"
         for it in header_items:
             t = it["text"]
-            # Echo Name
             if len(t) >= 5 and not re.search(r'^\d+$', t):
                 if not any(k in t.lower() for k in ["cost", "upgrade", "management", "echo skill", "user id", "level", "sort"]):
                     if data["name"] == "Unknown Echo":
                         data["name"] = t
 
-            # Level (+0 to +25)
             m_lvl = re.search(r'\+(\d+)', t)
             if m_lvl:
                 data["level"] = int(m_lvl.group(1))
-                # Detect Sonata color right next to level
-                # Carefully bound icon region to isolate icon from dark background
                 icon_h = it["max_y"] - it["min_y"]
                 ix1 = int(it["max_x"] + 2)
                 ix2 = int(ix1 + icon_h * 1.3)
@@ -322,17 +286,14 @@ class EchoParser:
                     icon_crop = card[iy1:iy2, ix1:ix2]
                     detected_sonata_color = self.detect_sonata_color(icon_crop)
 
-            # Cost directly from header
             m_cost = re.search(r'COST\s*([134])', t, re.IGNORECASE)
             if m_cost:
                 data["cost"] = int(m_cost.group(1))
 
-        # 2. Parse Stats items: Group into Left Labels and Right Values
         mid_x = cw * 0.65
         left_items = [it for it in stats_items if it["cx"] < mid_x]
         right_items = [it for it in stats_items if it["cx"] >= mid_x]
 
-        # Merge split label lines (e.g. "Resonance Skill DMG" + "Bonus")
         merged_left = []
         idx = 0
         while idx < len(left_items):
@@ -349,7 +310,6 @@ class EchoParser:
             merged_left.append(curr)
             idx += 1
 
-        # Match each right value with its left label by closest vertical Y
         stat_pairs = []
         used_left = set()
         for r in right_items:
@@ -372,25 +332,22 @@ class EchoParser:
 
         stat_pairs.sort(key=lambda p: p["cy"])
 
-        # First 2 are Main Stats, remaining up to 5 are Sub-Stats
         if len(stat_pairs) >= 2:
             data["main_stats"] = [parse_stat_line(p["label"], p["value"]) for p in stat_pairs[:2]]
             data["sub_stats"] = [parse_stat_line(p["label"], p["value"]) for p in stat_pairs[2:]]
         else:
             data["sub_stats"] = [parse_stat_line(p["label"], p["value"]) for p in stat_pairs]
 
-        # 3. Sonata Final Resolution (Color detection + Hybrid Name/Stat fallback)
+        # Sonata Final Resolution (Color detection + Hybrid Name/Stat fallback)
         if detected_sonata_color != "Unknown" and detected_sonata_color != "Glacio (Freezing Frost / Frosty Resolve)":
             data["sonata"] = detected_sonata_color
         else:
-            # If color was Glacio or Unknown, double-check using monster name / 3-Cost elemental main stat
             inferred = self.infer_sonata_from_name_or_stats(data["name"], data["main_stats"])
             if inferred != "Unknown":
                 data["sonata"] = inferred
             else:
                 data["sonata"] = detected_sonata_color
 
-        # 4. Game Rule Cross-Validation: Infer Cost with 100% certainty if missed
         if data["cost"] == 0 and len(data["main_stats"]) > 0:
             m1 = data["main_stats"][0]["stat"]
             m2 = data["main_stats"][1]["stat"] if len(data["main_stats"]) > 1 else ""
@@ -403,7 +360,6 @@ class EchoParser:
             elif "HP" in m2 and m2_val > 1000:
                 data["cost"] = 1
 
-        # 5. Calculate Crit Value (CV)
         sub_cr = 0.0
         sub_cd = 0.0
         for s in data["sub_stats"]:
